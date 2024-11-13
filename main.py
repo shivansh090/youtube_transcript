@@ -3,6 +3,16 @@ import streamlit as st
 from youtube_transcript_api import YouTubeTranscriptApi
 from urllib.parse import urlparse, parse_qs
 import time
+import socket
+import requests
+
+# Force requests to use IPv4
+original_getaddrinfo = socket.getaddrinfo
+
+def ipv4_getaddrinfo(*args, **kwargs):
+    return [info for info in original_getaddrinfo(*args, **kwargs) if info[0] == socket.AF_INET]
+
+socket.getaddrinfo = ipv4_getaddrinfo
 
 SUMMARY_API_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-cnn"
 QA_API_URL = "https://api-inference.huggingface.co/models/deepset/roberta-base-squad2"
@@ -64,15 +74,26 @@ def extract_video_id(url):
             return parsed_url.path.split('/')[2]
     return None
 
-def get_transcript(url):
-    try:
-        video_id = extract_video_id(url)
-        if not video_id:
-            return "Error: Could not extract video ID from URL", None
-        transcript = YouTubeTranscriptApi.get_transcript(video_id)
-        return " ".join(entry['text'] for entry in transcript), video_id
-    except Exception as e:
-        return f"Error: {str(e)}", None
+from youtube_transcript_api._errors import TooManyRequests
+import time
+
+def get_transcript(url, retries=3, wait_time=5):
+    video_id = extract_video_id(url)
+    if not video_id:
+        return "Error: Could not extract video ID from URL", None
+
+    for attempt in range(retries):
+        try:
+            transcript_data = YouTubeTranscriptApi.list_transcripts(video_id).find_transcript(['en']).fetch()
+            return " ".join(entry['text'] for entry in transcript_data), video_id
+        except TooManyRequests:
+            if attempt < retries - 1:
+                time.sleep(wait_time)  # Wait before retrying
+                wait_time *= 2  # Exponential backoff
+            else:
+                return "Error: Rate limit exceeded. Please try again later.", None
+        except Exception as e:
+            return f"Error: {str(e)}", None
 
 # Streamlit Interface with Gradient Title
 st.markdown(

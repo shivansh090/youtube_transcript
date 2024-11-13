@@ -10,8 +10,13 @@ summary_headers = {"Authorization": "Bearer hf_IiVbMEQpBVkvnVhjBQeBjLDzORqKiVYqT
 qa_headers = {"Authorization": "Bearer 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"}
 
 def query(api_url, headers, payload):
-    response = requests.post(api_url, headers=headers, json=payload)
-    return response.json()
+    try:
+        response = requests.post(api_url, headers=headers, json=payload)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        st.error(f"API request failed: {str(e)}")
+        return None
 
 def chunk_text(text, max_length=512):
     words = text.split()
@@ -33,7 +38,10 @@ def generate_summary(text):
             "inputs": chunk,
             "parameters": {"min_length": min_len, "max_length": max_len}
         })
-        summaries.append(output[0]['summary_text'])
+        if output and isinstance(output, list) and len(output) > 0:
+            summaries.append(output[0]['summary_text'])
+        else:
+            st.warning(f"Unexpected API response for chunk {i+1}")
         progress_bar.progress((i + 1) / total_chunks)
         progress_text.text(f"Progress: {int((i + 1) / total_chunks * 100)}%")
 
@@ -44,17 +52,25 @@ def generate_summary(text):
 
 def extract_video_id(url):
     parsed_url = urlparse(url)
-    if parsed_url.query:
-        return parse_qs(parsed_url.query).get('v', [None])[0]
-    return parsed_url.path.split('/')[-1] if '/' in parsed_url.path else None
+    if parsed_url.netloc == 'youtu.be':
+        return parsed_url.path[1:]
+    if parsed_url.netloc in ('www.youtube.com', 'youtube.com'):
+        if parsed_url.path == '/watch':
+            p = parse_qs(parsed_url.query)
+            return p['v'][0]
+        if parsed_url.path[:7] == '/embed/':
+            return parsed_url.path.split('/')[2]
+        if parsed_url.path[:3] == '/v/':
+            return parsed_url.path.split('/')[2]
+    return None
 
 def get_transcript(url):
     try:
         video_id = extract_video_id(url)
         if not video_id:
             return "Error: Could not extract video ID from URL", None
-        transcript_data = YouTubeTranscriptApi.list_transcripts(video_id).find_manually_created_transcript(['en']).fetch()
-        return " ".join(entry['text'] for entry in transcript_data), video_id
+        transcript = YouTubeTranscriptApi.get_transcript(video_id)
+        return " ".join(entry['text'] for entry in transcript), video_id
     except Exception as e:
         return f"Error: {str(e)}", None
 
@@ -77,11 +93,14 @@ if video_url:
         if choice == 'Generate Summary':
             st.write("Generating summary...")
             summary, elapsed_time = generate_summary(transcript)
-            st.success("Summary generated successfully!")
-            st.subheader("Summary")
-            st.text_area("Video Summary", value=summary, height=300, max_chars=5000)
-            st.write(f"Time taken to generate summary: {elapsed_time:.2f} seconds")
-            st.download_button("Download Summary", data=summary, file_name=f"summary_{video_id}.txt", mime="text/plain")
+            if summary:
+                st.success("Summary generated successfully!")
+                st.subheader("Summary")
+                st.text_area("Video Summary", value=summary, height=300, max_chars=5000)
+                st.write(f"Time taken to generate summary: {elapsed_time:.2f} seconds")
+                st.download_button("Download Summary", data=summary, file_name=f"summary_{video_id}.txt", mime="text/plain")
+            else:
+                st.error("Failed to generate summary. Please try again.")
 
         elif choice == 'Ask Questions':
             st.subheader("Ask Questions About the Video")
@@ -92,20 +111,31 @@ if video_url:
                     output = query(QA_API_URL, qa_headers, {
                         "inputs": {"question": question, "context": transcript}
                     })
-                    answer = output.get("answer", "No answer found.")
-                    confidence = output.get("score", 0) * 100  # Convert to percentage
+                    if output:
+                        answer = output.get("answer", "No answer found.")
+                        confidence = output.get("score", 0) * 100  # Convert to percentage
 
-                    # Confidence color-coding
-                    confidence_color = "green" if confidence > 70 else "yellow" if confidence >= 50 else "red"
-                    # Display answer and confidence with color-coded confidence
-                    st.write(f"Answer: {answer}")
-                    st.markdown(
-                        f"<span style='color:{confidence_color}; font-weight:bold;'>Confidence: {confidence:.2f}%</span>",
-                        unsafe_allow_html=True
-                    )
+                        # Confidence color-coding
+                        confidence_color = "green" if confidence > 70 else "yellow" if confidence >= 50 else "red"
+                        # Display answer and confidence with color-coded confidence
+                        st.write(f"Answer: {answer}")
+                        st.markdown(
+                            f"<span style='color:{confidence_color}; font-weight:bold;'>Confidence: {confidence:.2f}%</span>",
+                            unsafe_allow_html=True
+                        )
+                    else:
+                        st.error("Failed to get an answer. Please try again.")
                 else:
                     st.write("Please enter a question.")
     else:
         st.error(transcript)  # Display error if transcript extraction fails
 else:
     st.write("Please enter a valid YouTube URL.")
+
+# Add a button to test API connection
+if st.sidebar.button("Test API Connection"):
+    test_response = query(SUMMARY_API_URL, summary_headers, {"inputs": "Test connection"})
+    if test_response:
+        st.sidebar.success("API connection successful!")
+    else:
+        st.sidebar.error("API connection failed. Check your network connection.")
